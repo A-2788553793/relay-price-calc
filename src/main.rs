@@ -160,8 +160,11 @@ fn verdict_view(ui: &mut egui::Ui, results: &[Result<f64, String>]) {
     }
 }
 
-/// 最多保留 4 位小数，去掉末尾多余的 0。
+/// 最多保留 4 位小数，去掉末尾多余的 0；非常小的数用科学计数法，避免显示成 0。
 fn fmt(v: f64) -> String {
+    if v != 0.0 && v.abs() < 1e-4 {
+        return format!("{v:.3e}");
+    }
     let s = format!("{v:.4}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
     if s == "-0" { "0".to_string() } else { s.to_string() }

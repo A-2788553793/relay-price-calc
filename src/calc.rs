@@ -18,8 +18,8 @@ pub enum Verdict {
     Equal,
 }
 
-/// 两个系数差距小于这个值就视为一样贵，避免浮点误差。
-const EPSILON: f64 = 1e-9;
+/// 两个系数的相对差距小于这个比例就视为一样贵，只用来吸收浮点误差。
+const RELATIVE_EPSILON: f64 = 1e-12;
 
 impl Prices {
     /// 校验数值：都必须是有限、非负的数；缓存率必须在 0~100 之间。
@@ -51,12 +51,17 @@ impl Prices {
         self.validate()?;
         let hit = self.cache_rate_percent / 100.0;
         let miss = 1.0 - hit;
-        Ok(self.input * miss + self.cache_write * miss + self.cache_read * hit + self.output)
+        let c = self.input * miss + self.cache_write * miss + self.cache_read * hit + self.output;
+        if !c.is_finite() {
+            return Err("数值过大，无法计算".to_string());
+        }
+        Ok(c)
     }
 }
 
 pub fn compare(c1: f64, c2: f64) -> Verdict {
-    if (c1 - c2).abs() < EPSILON {
+    let scale = c1.abs().max(c2.abs());
+    if (c1 - c2).abs() <= scale * RELATIVE_EPSILON {
         Verdict::Equal
     } else if c1 < c2 {
         Verdict::Model1Cheaper
@@ -136,6 +141,14 @@ mod tests {
         assert_eq!(compare(1.0, 2.0), Verdict::Model1Cheaper);
         assert_eq!(compare(2.0, 1.0), Verdict::Model2Cheaper);
         assert_eq!(compare(0.1 + 0.2, 0.3), Verdict::Equal);
+        assert_eq!(compare(0.0, 0.0), Verdict::Equal);
+        // 极小但不为 0 的差距不能被当成一样贵
+        assert_eq!(compare(0.0, 5e-10), Verdict::Model1Cheaper);
+    }
+
+    #[test]
+    fn overflow_is_error() {
+        assert!(p(1e308, 1e308, 0.0, 0.0, 0.0).coefficient().is_err());
     }
 
     #[test]
