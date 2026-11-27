@@ -45,13 +45,13 @@ impl Prices {
         Ok(())
     }
 
-    /// 价格系数 = 输入×未命中 + 缓存写入×未命中 + 缓存读取×缓存率 + 输出
+    /// 价格系数 = (输入 + 输出) × 未命中 + (缓存读取 + 缓存写入) × 缓存率
     /// 其中 未命中 = 1 − 缓存率。
     pub fn coefficient(&self) -> Result<f64, String> {
         self.validate()?;
         let hit = self.cache_rate_percent / 100.0;
         let miss = 1.0 - hit;
-        let c = self.input * miss + self.cache_write * miss + self.cache_read * hit + self.output;
+        let c = (self.input + self.output) * miss + (self.cache_read + self.cache_write) * hit;
         if !c.is_finite() {
             return Err("数值过大，无法计算".to_string());
         }
@@ -106,21 +106,21 @@ mod tests {
 
     #[test]
     fn example_from_design() {
-        // 3×0.2 + 3.75×0.2 + 0.3×0.8 + 15 = 16.59
+        // (3 + 15)×0.2 + (0.3 + 3.75)×0.8 = 3.6 + 3.24 = 6.84
         let c = p(3.0, 15.0, 3.75, 0.3, 80.0).coefficient().unwrap();
-        assert!(close(c, 16.59), "got {c}");
+        assert!(close(c, 6.84), "got {c}");
     }
 
     #[test]
-    fn zero_cache_rate_uses_full_input_and_write() {
+    fn zero_cache_rate_uses_only_input_and_output() {
         let c = p(2.0, 8.0, 1.0, 0.5, 0.0).coefficient().unwrap();
-        assert!(close(c, 2.0 + 1.0 + 8.0));
+        assert!(close(c, 2.0 + 8.0));
     }
 
     #[test]
-    fn full_cache_rate_uses_only_read() {
+    fn full_cache_rate_uses_only_read_and_write() {
         let c = p(2.0, 8.0, 1.0, 0.5, 100.0).coefficient().unwrap();
-        assert!(close(c, 0.5 + 8.0));
+        assert!(close(c, 0.5 + 1.0));
     }
 
     #[test]
