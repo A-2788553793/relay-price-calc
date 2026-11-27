@@ -70,6 +70,54 @@ pub fn compare(c1: f64, c2: f64) -> Verdict {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ranked {
+    pub index: usize,
+    pub coefficient: f64,
+}
+
+/// 跳过 None，按价格系数排序；浮点误差内的并列模型保持输入顺序。
+pub fn rank(coeffs: &[Option<f64>]) -> Vec<Ranked> {
+    let mut ranked: Vec<_> = coeffs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &coefficient)| {
+            coefficient.map(|coefficient| Ranked { index, coefficient })
+        })
+        .collect();
+    ranked.sort_by(|a, b| a.coefficient.total_cmp(&b.coefficient));
+
+    // 相对误差相等不具传递性，不能直接用作 sort_by 的比较器。
+    // 以每组最小值为基准归并近似相等项，避免误差链把明显不同的价格归为并列。
+    // 再恢复组内的原始顺序。
+    let mut start = 0;
+    while start < ranked.len() {
+        let mut end = start + 1;
+        while end < ranked.len()
+            && is_equal(ranked[start].coefficient, ranked[end].coefficient)
+        {
+            end += 1;
+        }
+        ranked[start..end].sort_by_key(|item| item.index);
+        start = end;
+    }
+    ranked
+}
+
+/// 便宜的比贵的便宜多少百分比；贵的系数非正时返回 0。
+pub fn saving_percent(cheap: f64, dear: f64) -> f64 {
+    if dear <= 0.0 {
+        0.0
+    } else {
+        (dear - cheap) / dear * 100.0
+    }
+}
+
+/// 与 compare 返回 Equal 使用同一规则。
+pub fn is_equal(a: f64, b: f64) -> bool {
+    compare(a, b) == Verdict::Equal
+}
+
 /// 把用户输入的文本解析成数字。空白视为 0；支持全角数字和句号、末尾的 % 号。
 pub fn parse_number(text: &str) -> Result<f64, String> {
     let normalized: String = text
@@ -162,5 +210,59 @@ mod tests {
         assert!(parse_number("abc").is_err());
         assert!(parse_number("inf").is_err());
         assert!(parse_number("NaN").is_err());
+    }
+
+    #[test]
+    fn rank_sorts_and_skips_missing_models() {
+        assert_eq!(
+            rank(&[Some(3.0), None, Some(1.0), Some(2.0)]),
+            vec![
+                Ranked { index: 2, coefficient: 1.0 },
+                Ranked { index: 3, coefficient: 2.0 },
+                Ranked { index: 0, coefficient: 3.0 },
+            ]
+        );
+        assert!(rank(&[]).is_empty());
+        assert!(rank(&[None, None]).is_empty());
+    }
+
+    #[test]
+    fn rank_preserves_order_for_exact_and_approximate_ties() {
+        for values in [
+            [0.3, 0.1 + 0.2],
+            [0.1 + 0.2, 0.3],
+            [1.0, 1.0],
+            [1.0 + 5e-13, 1.0],
+        ] {
+            let ranked = rank(&values.map(Some));
+            assert_eq!(ranked.iter().map(|r| r.index).collect::<Vec<_>>(), [0, 1]);
+        }
+        let ranked = rank(&[Some(0.1 + 0.2), Some(2.0), Some(0.3), Some(0.0)]);
+        assert_eq!(ranked.iter().map(|r| r.index).collect::<Vec<_>>(), [3, 0, 2, 1]);
+    }
+
+    #[test]
+    fn saving_percent_handles_boundaries() {
+        assert!(close(saving_percent(1.0, 4.0), 75.0));
+        assert_eq!(saving_percent(0.0, 1.0), 100.0);
+        assert_eq!(saving_percent(1.0, 1.0), 0.0);
+        assert_eq!(saving_percent(0.0, 0.0), 0.0);
+        assert_eq!(saving_percent(1.0, -1.0), 0.0);
+        assert_eq!(saving_percent(2.0, 1.0), -100.0);
+    }
+
+    #[test]
+    fn rank_does_not_merge_a_chain_beyond_relative_tolerance() {
+        let values = [1.0 + 1.5e-12, 1.0 + 0.75e-12, 1.0];
+        assert!(!is_equal(values[0], values[2]));
+        let ranked = rank(&values.map(Some));
+        assert_eq!(ranked.last().unwrap().index, 0);
+    }
+
+    #[test]
+    fn equality_matches_compare() {
+        for (a, b) in [(0.3, 0.1 + 0.2), (0.0, 0.0), (0.0, 5e-10), (1.0, 2.0)] {
+            assert_eq!(is_equal(a, b), compare(a, b) == Verdict::Equal);
+        }
     }
 }
