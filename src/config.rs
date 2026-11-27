@@ -120,9 +120,14 @@ pub fn save(cfg: &AppConfig) -> Result<(), String> {
 pub fn load_from(path: &Path) -> AppConfig {
     let mut cfg = match fs::read(path) {
         Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
-            Ok(value) if value.is_object() => {
-                serde_json::from_value::<AppConfig>(value).unwrap_or_default()
-            }
+            Ok(value) if value.is_object() => match serde_json::from_value::<AppConfig>(value) {
+                Ok(cfg) => cfg,
+                Err(_) => {
+                    // 字段类型不对导致整体无法解析时同样先备份，防止随后自动保存覆盖原数据
+                    backup_broken_config(path);
+                    AppConfig::default()
+                }
+            },
             _ => {
                 // 字段类型不匹配沿用原有默认值逻辑；语法损坏或 JSON
                 // 不完整时先保留原文件，避免随后自动保存导致数据丢失。
@@ -324,15 +329,26 @@ mod tests {
     }
 
     #[test]
-    fn field_defaults_and_type_errors_do_not_create_backups() {
+    fn missing_fields_do_not_create_backups() {
         let dir = TempDir::new();
         let path = dir.path().join("config.json");
-        for original in ["{}", r#"{"models":[{}]}"#, r#"{"font_size":"bad"}"#] {
+        for original in ["{}", r#"{"models":[{}]}"#] {
             fs::write(&path, original).unwrap();
             assert_eq!(load_from(&path), AppConfig::default());
             assert_eq!(fs::read_to_string(&path).unwrap(), original);
             assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
         }
+    }
+
+    #[test]
+    fn type_errors_are_backed_up_before_returning_defaults() {
+        let dir = TempDir::new();
+        let path = dir.path().join("config.json");
+        let original = r#"{"font_size":"bad"}"#;
+        fs::write(&path, original).unwrap();
+        assert_eq!(load_from(&path), AppConfig::default());
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
     }
 
     #[test]
