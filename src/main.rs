@@ -7,7 +7,7 @@ use eframe::egui::{
     self, Align, Color32, FontData, FontDefinitions, FontFamily, FontId, Layout, Margin, RichText,
     Rounding, Stroke, TextStyle, Theme, Vec2,
 };
-use relay_price_calc::calc::{parse_number, rank, saving_percent, Prices, Ranked};
+use relay_price_calc::calc::{is_equal, parse_number, rank, saving_percent, Prices, Ranked};
 use relay_price_calc::config::{
     self, AppConfig, ModelConfig, DEFAULT_FONT_SIZE, FIELD_COUNT, MAX_FONT_SIZE, MIN_FONT_SIZE,
     MODEL_COUNT,
@@ -482,6 +482,15 @@ impl App {
                     .stroke(Stroke::new(1.0_f32, pal.card_stroke)),
             )
             .show(ctx, |ui| {
+                if let Some(e) = &self.save_error {
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new(format!("自动保存失败：{e}"))
+                                .color(pal.error)
+                                .size(self.fs(0.85)),
+                        );
+                    });
+                }
                 let errors = results.iter().filter(|r| matches!(r, ModelResult::Err(_))).count();
                 if ranking.len() < 2 {
                     ui.vertical_centered(|ui| {
@@ -502,7 +511,7 @@ impl App {
                     .map(|(i, m)| display_name(m, i))
                     .collect();
                 let cheapest = cheapest_indices(ranking);
-                let best = ranking[0].coefficient;
+                let best = best_coefficient(ranking).unwrap_or(0.0);
 
                 ui.vertical_centered(|ui| {
                     let headline = if cheapest.len() == ranking.len() {
@@ -521,19 +530,21 @@ impl App {
                 ui.add_space(4.0);
 
                 // 排名列表
-                let mut place = 0;
-                let mut prev: Option<f64> = None;
                 egui::Grid::new("ranking")
                     .num_columns(4)
                     .spacing([18.0, 4.0])
                     .show(ui, |ui| {
-                        for (n, r) in ranking.iter().enumerate() {
-                            // 并列的名次相同
-                            if prev.map_or(true, |p| !relay_price_calc::calc::is_equal(p, r.coefficient)) {
-                                place = n + 1;
-                            }
-                            prev = Some(r.coefficient);
-                            let is_best = relay_price_calc::calc::is_equal(r.coefficient, best);
+                        for r in ranking {
+                            let is_best = cheapest.contains(&r.index);
+                            // 名次 = 1 + 明显比它便宜的模型数（一样贵的并列）；最便宜的一定是第 1 名
+                            let place = if is_best {
+                                1
+                            } else {
+                                1 + ranking
+                                    .iter()
+                                    .filter(|o| o.coefficient < r.coefficient && !is_equal(o.coefficient, r.coefficient))
+                                    .count()
+                            };
                             let color = if is_best { pal.good } else { ui.visuals().text_color() };
                             ui.label(RichText::new(format!("第 {place} 名")).color(color));
                             ui.label(RichText::new(&names[r.index]).strong().color(color));
@@ -554,11 +565,6 @@ impl App {
                         RichText::new(format!("有 {errors} 个模型数值有误，未参与比较"))
                             .color(pal.error)
                             .size(self.fs(0.85)),
-                    );
-                }
-                if let Some(e) = &self.save_error {
-                    ui.label(
-                        RichText::new(format!("自动保存失败：{e}")).color(pal.error).size(self.fs(0.85)),
                     );
                 }
             });
@@ -687,14 +693,19 @@ fn section(ui: &mut egui::Ui, title: &str) {
     ui.separator();
 }
 
-/// 排名第一且与第一名一样贵的所有模型下标。
+/// 参与比较的模型中真正最小的系数。
+fn best_coefficient(ranking: &[Ranked]) -> Option<f64> {
+    ranking.iter().map(|r| r.coefficient).reduce(f64::min)
+}
+
+/// 与最小系数一样贵（在浮点误差范围内）的所有模型下标。标题、高亮、名次都以它为准。
 fn cheapest_indices(ranking: &[Ranked]) -> Vec<usize> {
-    let Some(first) = ranking.first() else {
+    let Some(best) = best_coefficient(ranking) else {
         return Vec::new();
     };
     ranking
         .iter()
-        .take_while(|r| relay_price_calc::calc::is_equal(r.coefficient, first.coefficient))
+        .filter(|r| is_equal(r.coefficient, best))
         .map(|r| r.index)
         .collect()
 }
@@ -707,4 +718,36 @@ fn fmt(v: f64) -> String {
     let s = format!("{v:.4}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
     if s == "-0" { "0".to_string() } else { s.to_string() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cheapest_uses_true_minimum_for_near_ties() {
+        // 近似相等不具传递性：最便宜的判定必须以真正的最小值为基准
+        let ranking = rank(&[Some(1.00000000000075), Some(1.0), Some(1.0000000000015), None]);
+        let mut cheapest = cheapest_indices(&ranking);
+        cheapest.sort();
+        assert_eq!(cheapest, vec![0, 1]);
+        assert_eq!(best_coefficient(&ranking), Some(1.0));
+    }
+
+    #[test]
+    fn cheapest_handles_empty_and_all_equal() {
+        assert!(cheapest_indices(&[]).is_empty());
+        let ranking = rank(&[Some(2.0), None, Some(2.0), None]);
+        assert_eq!(cheapest_indices(&ranking).len(), ranking.len());
+    }
+
+    #[test]
+    fn empty_model_is_skipped_and_bad_input_is_error() {
+        let mut m = ModelConfig::new(0);
+        assert!(matches!(evaluate(&m), ModelResult::Empty));
+        m.values[0] = "abc".into();
+        assert!(matches!(evaluate(&m), ModelResult::Err(_)));
+        m.values = ["3".into(), "15".into(), "3.75".into(), "0.3".into(), "80".into()];
+        assert!(matches!(evaluate(&m), ModelResult::Ok(c) if (c - 6.84).abs() < 1e-9));
+    }
 }

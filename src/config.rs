@@ -118,12 +118,41 @@ pub fn save(cfg: &AppConfig) -> Result<(), String> {
 }
 
 pub fn load_from(path: &Path) -> AppConfig {
-    let mut cfg: AppConfig = fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default();
+    let mut cfg = match fs::read(path) {
+        Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(value) if value.is_object() => {
+                serde_json::from_value::<AppConfig>(value).unwrap_or_default()
+            }
+            _ => {
+                // 字段类型不匹配沿用原有默认值逻辑；语法损坏或 JSON
+                // 不完整时先保留原文件，避免随后自动保存导致数据丢失。
+                backup_broken_config(path);
+                AppConfig::default()
+            }
+        },
+        Err(err) => {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                backup_broken_config(path);
+            }
+            AppConfig::default()
+        }
+    };
     cfg.sanitize();
     cfg
+}
+
+/// 备份只复制、不移动原文件；备份失败不影响默认配置的返回。
+fn backup_broken_config(path: &Path) {
+    let Some(filename) = path.file_name() else {
+        return;
+    };
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut backup_name = filename.to_os_string();
+    backup_name.push(format!(".broken-{seconds}"));
+    let _ = fs::copy(path, path.with_file_name(backup_name));
 }
 
 // 无论写入、同步还是替换失败，都清理本次调用独占的临时文件。
@@ -257,6 +286,53 @@ mod tests {
         let cfg = load_from(&path);
         assert_eq!(cfg.models[0].name, "模型1");
         assert_eq!(cfg.font_size, MAX_FONT_SIZE);
+    }
+
+    #[test]
+    fn broken_json_is_copied_before_returning_defaults() {
+        for original in [
+            b"{broken".as_slice(),
+            b"{\"models\":[",
+            &[0xff, 0xfe],
+            b"[]",
+            b"null",
+        ] {
+            let dir = TempDir::new();
+            let path = dir.path().join("config.json");
+            fs::write(&path, original).unwrap();
+
+            assert_eq!(load_from(&path), AppConfig::default());
+            assert_eq!(fs::read(&path).unwrap(), original);
+            let backups: Vec<_> = fs::read_dir(dir.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|entry| entry != &path)
+                .collect();
+            assert_eq!(backups.len(), 1);
+            let name = backups[0].file_name().unwrap().to_str().unwrap();
+            let seconds = name.strip_prefix("config.json.broken-").unwrap();
+            assert!(seconds.parse::<u64>().is_ok());
+            assert_eq!(fs::read(&backups[0]).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn missing_file_returns_defaults_without_a_backup() {
+        let dir = TempDir::new();
+        assert_eq!(load_from(&dir.path().join("config.json")), AppConfig::default());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn field_defaults_and_type_errors_do_not_create_backups() {
+        let dir = TempDir::new();
+        let path = dir.path().join("config.json");
+        for original in ["{}", r#"{"models":[{}]}"#, r#"{"font_size":"bad"}"#] {
+            fs::write(&path, original).unwrap();
+            assert_eq!(load_from(&path), AppConfig::default());
+            assert_eq!(fs::read_to_string(&path).unwrap(), original);
+            assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+        }
     }
 
     #[test]
